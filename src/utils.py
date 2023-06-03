@@ -1,15 +1,33 @@
 import os
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.colors as colors
+from typing import Tuple
 
+import colorama
+import imageio
+import matplotlib.colors as colors
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 from annoy import AnnoyIndex
+from scipy.linalg import subspace_angles
 from sklearn.neighbors import NearestNeighbors
 
+np.set_printoptions(precision=5, suppress=True, linewidth=200)
 
 
-def get_number_of_clusters(X: torch.Tensor,  n_samples: int, threshold: float) -> int:
+def create_mp4_from_directory(directory_path, output_file):
+    png_files = [f for f in os.listdir(directory_path) if f.endswith('.png')]
+    png_files.sort()
+
+    images = []
+    for file in png_files:
+        file_path = os.path.join(directory_path, file)
+        images.append(imageio.imread(file_path))
+
+    # Create the MP4 video using imageio
+    imageio.mimsave(output_file, images, fps=10)
+
+
+def get_number_of_clusters(X: torch.Tensor, n_samples: int, threshold: float) -> int:
     """
     Computes the number of clusters in the given dataset
 
@@ -119,7 +137,7 @@ def sort_laplacian(L: np.ndarray, y: np.ndarray) -> np.ndarray:
     return L
 
 
-def sort_matrix_rows(A: np.ndarray , y: np.ndarray) -> np.ndarray:
+def sort_matrix_rows(A: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
     Sorts the rows of a matrix by a given order y
 
@@ -222,7 +240,7 @@ def plot_sorted_laplacian(W: torch.Tensor, y: np.ndarray):
     plt.show()
 
 
-def get_nearest_neighbors(X: torch.Tensor, Y: torch.Tensor = None, k: int = 3) -> tuple[np.ndarray, np.ndarray]:
+def get_nearest_neighbors(X: torch.Tensor, Y: torch.Tensor = None, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
     """
     Computes the distances and the indices of the 
     k nearest neighbors of each data point
@@ -247,6 +265,36 @@ def get_nearest_neighbors(X: torch.Tensor, Y: torch.Tensor = None, k: int = 3) -
     return Dis, Ids
 
 
+def numpy_print(arr: np.array, condition: np.array = None, color: colorama.Fore = colorama.Fore.RED):
+    """
+    Prints a numpy array with a given condition
+
+    Args:
+        arr:        Numpy array
+        condition:  Condition to check
+        color:      Color of the printed array
+    """
+
+    if condition is None:
+        print(arr)
+        return
+
+    for i in range(arr.shape[0]):
+        for j in range(arr.shape[1]):
+            c = color if condition[i, j] else colorama.Fore.RESET
+            print(c, '{:.5f}'.format(arr[i, j]), end='\t')
+        print(colorama.Style.RESET_ALL)
+def check_if_identety(A: np.ndarray) -> np.ndarray:
+    """
+    Checks if a given matrix is the identety matrix
+
+    Args:
+        A:  Numpy ndarray
+    """
+
+    return np.isclose(A, np.eye(A.shape[0]), atol=1e-4)
+
+
 def get_grassman_distance(A: np.ndarray, B: np.ndarray) -> float:
     """
     Computes the Grassmann distance between the subspaces spanned by the columns of A and B
@@ -256,6 +304,17 @@ def get_grassman_distance(A: np.ndarray, B: np.ndarray) -> float:
         B:  Numpy ndarray
     """
 
+    m = A.T @ A
+    close_to_identity = check_if_identety(m)
+    if not close_to_identity.all():
+        # pass
+        print(f"A is not orthogonal:")
+        numpy_print(m, ~close_to_identity)
+    m = B.T @ B
+    close_to_identity = check_if_identety(m)
+    if not close_to_identity.all():
+        print(f"B is not orthogonal:")
+        numpy_print(m, ~close_to_identity)
     M = np.dot(np.transpose(A), B)
     _, s, _ = np.linalg.svd(M, full_matrices=False)
     s = 1 - np.square(s)
@@ -263,7 +322,38 @@ def get_grassman_distance(A: np.ndarray, B: np.ndarray) -> float:
     return grassmann
 
 
-def compute_scale(Dis: np.ndarray, k: int = 2, med: bool = True, is_local: bool = True) -> np.ndarray:
+def grassmann_dist(A, B):
+    """
+    Compute the Grassmann distance between two subspaces A and B using NumPy.
+
+    Parameters:
+        A: numpy array, shape (m, n)
+            The first subspace, represented by a matrix with m rows and n columns.
+        B: numpy array, shape (m, p)
+            The second subspace, represented by a matrix with m rows and p columns.
+
+    Returns:
+        dist: float
+            The Grassmann distance between the subspaces A and B.
+    """
+    # Compute the singular value decomposition of the matrix product A^T B
+    _, s, _ = np.linalg.svd(A.T @ B)
+    # Compute the squared singular values of A and B
+    s_A = np.linalg.svd(A, compute_uv=False) ** 2
+    s_B = np.linalg.svd(B, compute_uv=False) ** 2
+    # Compute the Grassmann distance
+    dist = np.sum(np.arccos(np.sqrt(s / s_A)) ** 2) + np.sum(np.arccos(np.sqrt(s / s_B)) ** 2)
+    return np.sqrt(dist)
+
+
+def grassmann_distance(A, B):
+    """
+    Compute the Grassmann distance between two subspaces A and B.
+    """
+    return np.linalg.norm(subspace_angles(A, B))
+
+
+def compute_scale(Dis: np.ndarray, k: int = 2, med: bool = False, is_local: bool = True) -> np.ndarray:
     """
     Computes the scale for the Gaussian similarity function
 

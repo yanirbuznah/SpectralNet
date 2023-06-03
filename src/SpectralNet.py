@@ -50,7 +50,7 @@ class SpectralNet:
             build_ann(X)
         spectral_trainer = SpectralTrainer(self.config, self.device, is_sparse=is_sparse)
         self.spec_net = spectral_trainer.train(X, y, self.siamese_net)
-        
+        spectral_trainer.plot_gt_distance()
     
     def predict(self, X: torch.Tensor) -> np.ndarray:
         """

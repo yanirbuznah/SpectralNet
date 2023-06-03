@@ -12,11 +12,11 @@
             "hidden_dim2": 128,
             "output_dim": 2
         },
-        "epochs": 40,
+        "epochs": 50,
         "lr": 1e-2,
         "lr_decay": 0.1,
         "min_lr": 1e-5,
-        "batch_size": 712,
+        "batch_size": 512,
         "n_neighbors": 8,
         "scale_k": 2,
         "is_local_scale": false,

@@ -1,3 +1,6 @@
+import copy
+
+import matplotlib.pyplot as plt
 import torch
 import numpy as np
 import torch.nn as nn
@@ -16,7 +19,7 @@ class SpectralNetModel(nn.Module):
         self.num_of_layers = self.architecture["n_layers"]
         self.layers = nn.ModuleList()
         self.input_dim = input_dim
-        
+        self.values_queue = []
         current_dim = self.input_dim
         for layer, dim in self.architecture.items():
             next_dim = dim
@@ -29,7 +32,7 @@ class SpectralNetModel(nn.Module):
                 layer = nn.Sequential(nn.Linear(current_dim, next_dim), nn.ReLU())
                 self.layers.append(layer)
                 current_dim = next_dim
-  
+
 
     def forward(self, x: torch.Tensor, is_orthonorm: bool = True) -> torch.Tensor:
         """
@@ -39,7 +42,7 @@ class SpectralNetModel(nn.Module):
 
         Args:
             x (torch.Tensor):               The input tensor
-            is_orthonorm (bool, optional):  Whether to orthonormalize the output or not. 
+            is_orthonorm (bool, optional):  Whether to orthonormalize the output or not.
                                             Defaults to True.
 
         Returns:
@@ -53,10 +56,11 @@ class SpectralNetModel(nn.Module):
         if is_orthonorm:
             m = Y_tilde.shape[0]
             to_factorize = torch.mm(Y_tilde.t(), Y_tilde)
-            
+
             try:
                 L = torch.linalg.cholesky(to_factorize, upper=False)
             except torch._C._LinAlgError:
+                print("The matrix is not positive definite. Adding a small value to the diagonal.")
                 to_factorize += 0.1 * torch.eye(to_factorize.shape[0])
                 L = torch.linalg.cholesky(to_factorize, upper=False)
 
@@ -71,11 +75,11 @@ class SpectralNetModel(nn.Module):
 class SpectralNetLoss(nn.Module):
     def __init__(self):
         super(SpectralNetLoss, self).__init__()
-    
+
     def forward(self, W: torch.Tensor, Y: torch.Tensor , is_normalized: bool = False) -> torch.Tensor:
         """
         This function computes the loss of the SpectralNet model.
-        The loss is the rayleigh quotient of the Laplacian matrix obtained from W, 
+        The loss is the rayleigh quotient of the Laplacian matrix obtained from W,
         and the orthonormalized output of the network.
 
         Args:
@@ -120,7 +124,11 @@ class SpectralTrainer:
         self.patience = self.spectral_config["patience"]
         self.batch_size = self.spectral_config["batch_size"]
         self.architecture = self.spectral_config["architecture"]
-    
+        self.gt_distances = []
+        self.gt_distances_amitai = []
+        self.values_queue = []
+
+
     def train(self, X: torch.Tensor, y: torch.Tensor, siamese_net: nn.Module = None) -> SpectralNetModel:
         """
         This function trains the SpectralNet model.
@@ -133,7 +141,8 @@ class SpectralTrainer:
         Returns:
             SpectralNetModel: The trained SpectralNet model
         """
-
+        best_loss = np.inf
+        best_model = None
         self.X = X.view(X.size(0), -1)
         self.y = y
         self.counter = 0
@@ -142,14 +151,19 @@ class SpectralTrainer:
         self.spectral_net = SpectralNetModel(self.architecture, input_dim=self.X.shape[1]).to(self.device)
         self.optimizer = optim.Adam(self.spectral_net.parameters(), lr=self.lr)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer,
-                                                              mode='min', 
-                                                              factor=self.lr_decay, 
+                                                              mode='min',
+                                                              factor=self.lr_decay,
                                                               patience=self.patience)
 
-        
-        train_loader, ortho_loader, valid_loader = self._get_data_loader()
-        
+
+        train_loader, ortho_loader, valid_loader,valid_dataset = self._get_data_loader()
+        x_valid_dataset, y_valid_dataset = zip(*valid_dataset)
+        x_valid_dataset = torch.stack(x_valid_dataset)
+        y_valid_dataset = torch.stack(y_valid_dataset)
         print("Training SpectralNet:")
+        W = self._get_affinity_matrix(x_valid_dataset)
+        L = get_laplacian(W)
+        Y_real = get_eigenvectors(L)[:, :self.spectral_config['architecture']['output_dim']]
         for epoch in range(self.epochs):
             train_loss = 0.0
             for (X_grad, y_grad), (X_orth, _) in zip(train_loader, ortho_loader):
@@ -165,11 +179,11 @@ class SpectralTrainer:
                 # Orthogonalization step
                 self.spectral_net.eval()
                 self.spectral_net(X_orth, is_orthonorm=True)
-                
+
                 # Gradient step
                 self.spectral_net.train()
                 self.optimizer.zero_grad()
-                
+
                 if self.is_sparse:
                     X_grad = make_batch_for_sparse_grapsh(X_grad)
 
@@ -186,19 +200,44 @@ class SpectralTrainer:
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
-            
+
             # Validation step
             valid_loss = self.validate(valid_loader)
             self.scheduler.step(valid_loss)
 
             current_lr = self.optimizer.param_groups[0]["lr"]
             if current_lr <= self.spectral_config["min_lr"]: break
-            print("Epoch: {}/{}, Train Loss: {:.7f}, Valid Loss: {:.7f}, LR: {:.6f}".
-            format(epoch + 1, self.epochs, train_loss, valid_loss, current_lr))
-        
+            print(f"Epoch: {epoch + 1}/{self.epochs}, Train Loss: {train_loss:.7f}, Valid Loss: {valid_loss:.7f} LR: {current_lr:.6f}")
+            if best_loss > valid_loss:
+                best_loss = valid_loss
+                best_model = copy.deepcopy(self.spectral_net.state_dict())
+
+            Y_out  = self.spectral_net(x_valid_dataset, is_orthonorm=False)
+            Y_out  = Y_out.detach().cpu().numpy() / np.sqrt(x_valid_dataset.shape[0])
+
+
+            g_distance = grassmann_distance(Y_out, Y_real)
+            g_distance_amitai = get_grassman_distance(Y_out, Y_real)
+            print(f"Grassmann Distance: {g_distance},Grassmann Distance Amity: {g_distance_amitai}")
+            self.gt_distances.append(g_distance)
+            self.gt_distances_amitai.append(g_distance_amitai)
+            self.counter += 1
+
+
+
+        print("Training finished.")
+        self.spectral_net.load_state_dict(best_model)
+
+
+        valid_loss = self.validate(valid_loader)
+        print("Final validation loss: {:.7f}".format(valid_loss))
+        print("best loss: {:.7f}".format(best_loss))
+        Y_out = self.spectral_net(x_valid_dataset).detach().cpu().numpy()
+        y = y_valid_dataset.numpy()
+        plot_laplacian_eigenvectors(Y_out[:,0:2], y)
         return self.spectral_net
-    
-    def validate(self, valid_loader: DataLoader) -> float:
+
+    def validate(self, valid_loader: DataLoader,dataset = None, finish=False) -> float:
         """
         This function validates the SpectralNet model during the training process.
 
@@ -218,8 +257,8 @@ class SpectralTrainer:
 
                 if self.is_sparse:
                     X = make_batch_for_sparse_grapsh(X)
-                    
-                Y = self.spectral_net(X, is_orthonorm=False)
+
+                Y = self.spectral_net(X, is_orthonorm=True)
                 with torch.no_grad():
                     if self.siamese_net is not None:
                         X = self.siamese_net.forward_once(X)
@@ -228,13 +267,64 @@ class SpectralTrainer:
 
                 loss = self.criterion(W, Y)
                 valid_loss += loss.item()
-        
-        self.counter += 1
+                if finish:
+                    L = get_laplacian(W)
+                    y = Y[:, -1].detach().cpu().numpy()
+                    value = (y.T @ L @ y).item()
+                    self.values_queue.append(value)
+                    if len(self.values_queue) > 10:
+                        self.values_queue.pop(0)
+                    print(
+                        f"Mean of last 10 values: {np.mean(self.values_queue)} | std of last 10 values: {np.std(self.values_queue)} | Last value: {value} ")
 
         valid_loss /= len(valid_loader)
         return valid_loss
-            
-    
+
+    def plot_subplots(self, Y_out, Y_real, g_distance, g_distance_amitai):
+        num_plots = Y_out.shape[1]  # Number of subplots
+        num_cols = min(3, num_plots)  # Number of columns in the subplot grid
+        num_rows = (num_plots - 1) // num_cols + 1  # Number of rows in the subplot grid
+
+        fig, axes = plt.subplots(num_rows, num_cols, figsize=(12, 8))
+
+        for i, ax in enumerate(axes.flat):
+            if i < num_plots:
+                vector1 = Y_out[:, i]
+                vector2 = Y_real[:, i]
+                ax.plot(vector1)
+                ax.plot(vector2)
+                ax.set_title(f'eigen vector {i + 1}')
+            else:
+                # Hide unused subplots
+                ax.axis('off')
+
+        plt.tight_layout()
+        plt.legend(["real", "out"])
+        plt.title(f"G_dist: {g_distance:0.4} G_dist_A: {g_distance_amitai:0.4}")
+        plt.savefig(fr'C:\Users\yanir\PycharmProjects\SpectralNet\vectors\{self.counter}.png', dpi=600)
+        plt.close()
+
+    def save_eigenvectors_fig(self, Y_out, Y_real, g_distance, g_distance_amitai):
+        plt.plot(Y_real[:, 1:])
+        plt.plot(Y_out[:, 1:])
+        plt.legend(["real", "out"])
+        plt.title(f"Grassmann Distance: {g_distance:0.4} Grassmann Distance Amity: {g_distance_amitai:0.4}")
+        plt.savefig(fr'C:\Users\yanir\PycharmProjects\SpectralNet\vectors\{self.counter}.png', dpi=800)
+        plt.close()
+
+    def show_eigenvectors_fig(self, Y_out, Y_real):
+        plt.plot(Y_real[:, 1:])
+        plt.plot(Y_out[:, 1:])
+        plt.legend(["real", "out"])
+        plt.show()
+
+    def plot_gt_distance(self):
+        plt.plot(self.gt_distances)
+        plt.plot(self.gt_distances_amitai)
+        plt.legend(["Grassmann Distance", "Grassmann Distance Amitai"])
+        plt.show()
+
+
     def _get_affinity_matrix(self, X: torch.Tensor) -> torch.Tensor:
         """
         This function computes the affinity matrix W using the Gaussian kernel.
@@ -272,7 +362,7 @@ class SpectralTrainer:
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         ortho_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         valid_loader = DataLoader(valid_dataset, batch_size=self.batch_size, shuffle=False)
-        return train_loader, ortho_loader, valid_loader
+        return train_loader, ortho_loader, valid_loader, valid_dataset
 
 
 
@@ -283,9 +373,9 @@ class ReduceLROnAvgLossPlateau(_LRScheduler):
 
         Args:
             optimizer (_type_):             The optimizer
-            factor (float, optional):       factor by which the learning rate will be reduced. 
+            factor (float, optional):       factor by which the learning rate will be reduced.
                                             new_lr = lr * factor. Defaults to 0.1.
-            patience (int, optional):       number of epochs with no average improvement after 
+            patience (int, optional):       number of epochs with no average improvement after
                                             which learning rate will be reduced.
             min_lr (int, optional):         A lower bound on the learning rate of all param groups.
             verbose (bool, optional):       If True, prints a message to stdout for each update.
@@ -311,7 +401,7 @@ class ReduceLROnAvgLossPlateau(_LRScheduler):
         if epoch is None:
             epoch = self.last_epoch + 1
         self.last_epoch = epoch
-        
+
 
         current_loss = loss
         if len(self.avg_losses) < self.patience:
