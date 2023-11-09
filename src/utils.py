@@ -284,7 +284,7 @@ def numpy_print(arr: np.array, condition: np.array = None, color: colorama.Fore 
             c = color if condition[i, j] else colorama.Fore.RESET
             print(c, '{:.5f}'.format(arr[i, j]), end='\t')
         print(colorama.Style.RESET_ALL)
-def check_if_identety(A: np.ndarray) -> np.ndarray:
+def check_if_identety(A: np.ndarray,atol=1e-4) -> np.ndarray:
     """
     Checks if a given matrix is the identety matrix
 
@@ -292,7 +292,7 @@ def check_if_identety(A: np.ndarray) -> np.ndarray:
         A:  Numpy ndarray
     """
 
-    return np.isclose(A, np.eye(A.shape[0]), atol=1e-4)
+    return np.isclose(A, np.eye(A.shape[0]), atol=atol)
 
 
 def get_grassman_distance(A: np.ndarray, B: np.ndarray) -> float:
@@ -413,7 +413,24 @@ def get_gaussian_kernel(D: torch.Tensor, scale, Ids: np.ndarray, device: torch.d
     return sym_W
 
 
-def plot_data_by_assignmets(X, assignments: np.ndarray):
+def plot_data_by_assignments(X, assignments: np.ndarray):
+    """
+    Plots the data with the assignments obtained from SpectralNet.
+    Relevant only for 2D and 3D data
+
+    Args:
+        X:                      Data
+        cluster_assignments:    Cluster assignments
+    """
+
+    if X.shape[1] == 2:
+        plot_data_by_assignments_2D(X, assignments)
+    elif X.shape[1] == 3:
+        plot_data_by_assignments_3D(X, assignments)
+    else:
+        print("Data is not 2D or 3D")
+
+def plot_data_by_assignments_2D(X, assignments: np.ndarray):
     """
     Plots the data with the assignments obtained from SpectralNet.
     Relevant only for 2D data
@@ -425,6 +442,21 @@ def plot_data_by_assignmets(X, assignments: np.ndarray):
 
     plt.scatter(X[:, 0], X[:, 1], c=assignments)
     plt.show()
+
+def plot_data_by_assignments_3D(X, assignments: np.ndarray):
+    """
+    Plots the data with the assignments obtained from SpectralNet.
+    Relevant only for 3D data
+
+    Args:
+        X:                      Data
+        cluster_assignments:    Cluster assignments
+    """
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(X[:, 0], X[:, 2], X[:, 1], c=assignments)
+    plt.show()
+
 
 def calculate_cost_matrix(C: np.ndarray , n_clusters: int) -> np.ndarray:
     """
@@ -503,3 +535,28 @@ def get_affinity_matrix(X: torch.Tensor) -> torch.Tensor:
     W = get_gaussian_kernel(Dx, scale, indices, device=torch.device("cpu"), is_local=is_local)
     return W
 
+def read_off(filepath):
+    """
+    read a standard .off file
+
+    Parameters
+    -------------------------
+    file : path to a '.off'-format file
+
+    Output
+    -------------------------
+    vertices,faces : (n,3), (m,3) array of vertices coordinates
+                    and indices for triangular faces
+    """
+    with open(filepath, 'r') as f:
+        if f.readline().strip() != 'OFF':
+            raise TypeError('Not a valid OFF header')
+        n_verts, n_faces, _ = [int(x) for x in f.readline().strip().split(' ')]
+        vertices = [[float(x) for x in f.readline().strip().split()] for _ in range(n_verts)]
+        if n_faces > 0:
+            faces = [[int(x) for x in f.readline().strip().split()][1:4] for _ in range(n_faces)]
+            faces = np.asarray(faces)
+        else:
+            faces = None
+
+    return np.asarray(vertices), faces

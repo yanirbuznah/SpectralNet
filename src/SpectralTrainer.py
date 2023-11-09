@@ -1,5 +1,7 @@
 import copy
 
+import scipy
+import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
@@ -26,10 +28,10 @@ class SpectralNetModel(nn.Module):
             if layer == "n_layers":
                 continue
             if layer == "output_dim":
-                layer = nn.Sequential(nn.Linear(current_dim, next_dim), nn.Tanh())
+                layer = nn.Sequential(nn.Linear(current_dim, next_dim), nn.LeakyReLU())
                 self.layers.append(layer)
             else:
-                layer = nn.Sequential(nn.Linear(current_dim, next_dim), nn.ReLU())
+                layer = nn.Sequential(nn.Linear(current_dim, next_dim), nn.LeakyReLU())
                 self.layers.append(layer)
                 current_dim = next_dim
 
@@ -53,21 +55,29 @@ class SpectralNetModel(nn.Module):
             x = layer(x)
 
         Y_tilde = x
-        if is_orthonorm:
-            m = Y_tilde.shape[0]
-            to_factorize = torch.mm(Y_tilde.t(), Y_tilde)
 
-            try:
-                L = torch.linalg.cholesky(to_factorize, upper=False)
-            except torch._C._LinAlgError:
-                print("The matrix is not positive definite. Adding a small value to the diagonal.")
-                to_factorize += 0.1 * torch.eye(to_factorize.shape[0])
-                L = torch.linalg.cholesky(to_factorize, upper=False)
+        Y = torch.linalg.qr(Y_tilde, mode='reduced').Q
+        # if is_orthonorm:
+        #     m = Y_tilde.shape[0]
+        #     to_factorize = torch.mm(Y_tilde.t(), Y_tilde)
+        #     # try to add a small value to the diagonal to make it invertible if not invertible.
+        #     # do this in increasing powers of 10 until it is invertible.
+        #     for i in range(10, 0, -1):
+        #         try:
+        #             L = torch.linalg.cholesky(to_factorize, upper=False)
+        #             break
+        #         except torch._C._LinAlgError:
+        #             # turn to zero the values randomly 10%
+        #             print(f"The matrix is not positive definite. removing 10% of the values.")
+        #             to_factorize = torch.where(torch.rand(to_factorize.shape) < 0.05, torch.zeros(to_factorize.shape), to_factorize)
+        #             # print(f"The matrix is not positive definite. Adding a small value to the diagonal. (1e-{i})")
+        #             # to_factorize += torch.eye(to_factorize.shape[0]) * 10 ** (-i)
+        #             # to_factorize += torch.eye(to_factorize.shape[0]) * 10 ** (-i)
+        #
+        #     L_inverse = torch.linalg.inv(L)
+        #     self.orthonorm_weights = np.sqrt(m) * L_inverse.t()
 
-            L_inverse = torch.inverse(L)
-            self.orthonorm_weights = np.sqrt(m) * L_inverse.t()
-
-        Y = torch.mm(Y_tilde, self.orthonorm_weights)
+        # Y = torch.mm(Y_tilde, self.orthonorm_weights)
         return Y
 
 
@@ -100,6 +110,18 @@ class SpectralNetLoss(nn.Module):
 
         return loss
 
+class SemiDefiniteLoss(nn.Module):
+    def __init__(self):
+        super(SemiDefiniteLoss, self).__init__()
+
+    def forward(self, Y: torch.Tensor) -> torch.Tensor:
+        Y = Y / np.sqrt(Y.shape[0])
+        D = Y.T @ Y
+        diag = torch.diag(D)
+        # remove all the positive values from the diagonal
+        # D = torch.ones_like(diag) - diag
+        loss = (torch.sqrt((torch.ones_like(diag) - diag)**2)).sum()
+        return loss
 
 class SpectralTrainer:
     def __init__(self, config: dict, device: torch.device, is_sparse: bool = False):
@@ -125,7 +147,6 @@ class SpectralTrainer:
         self.batch_size = self.spectral_config["batch_size"]
         self.architecture = self.spectral_config["architecture"]
         self.gt_distances = []
-        self.gt_distances_amitai = []
         self.values_queue = []
 
 
@@ -188,13 +209,20 @@ class SpectralTrainer:
                     X_grad = make_batch_for_sparse_grapsh(X_grad)
 
                 Y = self.spectral_net(X_grad, is_orthonorm=False)
+                # if epoch > 5:
+                #     Y_norm = (Y / np.sqrt(Y.shape[0])).detach().cpu().numpy()
+                #     if not check_if_identety(Y_norm.T @ Y_norm,atol=0.1).all():
+                #         print("Y is not orthonormal")
+                #         print((Y_norm.T @ Y_norm))
+                #         # continue
                 if self.siamese_net is not None:
                     with torch.no_grad():
                         X_grad = self.siamese_net.forward_once(X_grad)
 
                 W = self._get_affinity_matrix(X_grad)
 
-                loss = self.criterion(W, Y)
+                loss = self.criterion(W, Y) #+ SemiDefiniteLoss()(Y) * 0.01
+                # loss = loss / loss.item()
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item()
@@ -213,14 +241,11 @@ class SpectralTrainer:
                 best_model = copy.deepcopy(self.spectral_net.state_dict())
 
             Y_out  = self.spectral_net(x_valid_dataset, is_orthonorm=False)
-            Y_out  = Y_out.detach().cpu().numpy() / np.sqrt(x_valid_dataset.shape[0])
+            Y_out  = Y_out.detach().cpu().numpy()
 
-
-            g_distance = grassmann_distance(Y_out, Y_real)
-            g_distance_amitai = get_grassman_distance(Y_out, Y_real)
-            print(f"Grassmann Distance: {g_distance},Grassmann Distance Amity: {g_distance_amitai}")
+            g_distance = get_grassman_distance(Y_out, Y_real)
+            print(f"Grassmann Distance: {g_distance}")
             self.gt_distances.append(g_distance)
-            self.gt_distances_amitai.append(g_distance_amitai)
             self.counter += 1
 
 
@@ -234,7 +259,7 @@ class SpectralTrainer:
         print("best loss: {:.7f}".format(best_loss))
         Y_out = self.spectral_net(x_valid_dataset).detach().cpu().numpy()
         y = y_valid_dataset.numpy()
-        plot_laplacian_eigenvectors(Y_out[:,0:2], y)
+        plot_laplacian_eigenvectors(Y_out[:,:], y)
         return self.spectral_net
 
     def validate(self, valid_loader: DataLoader,dataset = None, finish=False) -> float:
@@ -320,8 +345,7 @@ class SpectralTrainer:
 
     def plot_gt_distance(self):
         plt.plot(self.gt_distances)
-        plt.plot(self.gt_distances_amitai)
-        plt.legend(["Grassmann Distance", "Grassmann Distance Amitai"])
+        plt.legend(["Grassmann Distance"])
         plt.show()
 
 

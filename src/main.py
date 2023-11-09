@@ -44,6 +44,7 @@ def main():
     if not should_check_generalization:
         if y_train is None:
             x_train = torch.cat([x_train, x_test])
+
             
         else:
             x_train = torch.cat([x_train, x_test])
@@ -60,7 +61,8 @@ def main():
     if not should_check_generalization:
 
         cluster_assignments = spectralnet.predict(x_train)
-        plot_data_by_assignmets(x_train, cluster_assignments)
+        np.save('eigen_vectors_cat_1e5.npy', spectralnet.embeddings_)
+        plot_data_by_assignments(x_train, cluster_assignments)
 
         if y_train is not None:
             y = y_train.detach().cpu().numpy()
@@ -91,7 +93,7 @@ def main():
 if __name__ == "__main__":
     embeddings, assignments = main()
     write_assignmets_to_file(assignments)
-    np.save('emb_lion1.npy', embeddings)
+    np.save('emb_lion_off_200.npy', embeddings)
     print("Your assignments were saved to the file 'cluster_assignments.csv!")
     # create_mp4_from_directory(
     # r"C:\Users\yanir\PycharmProjects\SpectralNet\vectors", r'C:\Users\yanir\PycharmProjects\SpectralNet\movie.mp4'
